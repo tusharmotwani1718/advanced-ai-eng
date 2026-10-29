@@ -1,0 +1,15 @@
+{
+  "name": "01_agent_internals",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "openai": "^7.45.1"
+  }
+}
