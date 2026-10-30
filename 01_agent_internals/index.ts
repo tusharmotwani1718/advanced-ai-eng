@@ -1,8 +1,12 @@
 import OpenAI from "openai";
-import { spawn } from "node:child_process";
-
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 
 const client = new OpenAI();
+
+const DOCKER = process.env.DOCKER_PATH ?? "docker";
 
 const tools: OpenAI.Responses.FunctionTool[] = [
   {
@@ -26,7 +30,7 @@ const tools: OpenAI.Responses.FunctionTool[] = [
     type: "function",
     name: "bash",
     description:
-      "run a bash command in the project workspace. Returns stdout, stderr and exit code.",
+      "run a bash command in the project workspace. Returns stdout, stderr and exit code. Run commands. Do not use this to write file contents.",
     strict: true,
     parameters: {
       type: "object",
@@ -40,9 +44,27 @@ const tools: OpenAI.Responses.FunctionTool[] = [
       additionalProperties: false,
     },
   },
+  {
+    type: "function",
+    name: "write_file",
+    description:
+      "Create or overwrite a file in /workspace with the given content. Always use this to write file contents; do not use echo or heredocs in bash.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path, relative to /workspace" },
+        content: { type: "string", description: "The complete file content" },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+  },
 ];
 
-const systemPrompt = `You are a helpful assistant. Use tools when needed`;
+const systemPrompt = `You are a coding agent with a Linux sandbox. Your working directory is /workspace.
+Use write_file to create or change files. Use bash only to run commands (node, ls, cat, tests).
+Verify your work by running it. If something fails twice the same way, change your approach.`;
 
 const truncate = (s: string, max = 10_000) => {
   return s.length > max
@@ -61,7 +83,7 @@ async function callJSONPlaceholder(userId: number) {
 }
 
 // run bash command function:
-async function runBash(cmd: string, timeoutSec = 30) {
+function runBash(cmd: string, sandboxName: string, timeoutSec = 30) {
   return new Promise<{
     exitCode: number | null;
     signal: string | null;
@@ -69,10 +91,10 @@ async function runBash(cmd: string, timeoutSec = 30) {
     stderr: string;
   }>((res, rej) => {
     const child = spawn(
-      "C:/Users/WELCOME/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe", // path to docker executable
+      DOCKER, // path to docker executable
       [
         "exec", // docker subcommand runs a command inside an already running container, unlike "docker run"
-        "agent-sandbox", // name of the container
+        sandboxName, // name of the container
         "timeout",
         String(timeoutSec),
         "bash",
@@ -106,7 +128,74 @@ async function runBash(cmd: string, timeoutSec = 30) {
   });
 }
 
-async function runAgent(userQuery: string) {
+// write file function:
+function writeFileContent(
+  sandboxName: string,
+  filePath: string,
+  content: string,
+) {
+  return new Promise<{ok: boolean, error?: string}>((res, _) => {
+    const child = spawn(DOCKER, [
+      "exec", "-i", sandboxName,                    // -i keeps stdin open
+      "sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"',
+      "sh", filePath,                               // becomes $0 and $1 in the script
+    ]);
+
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (e) => res({ ok: false, error: e.message }));
+    child.on("close", (code) =>
+      res(code === 0 ? { ok: true } : { ok: false, error: stderr || `exit code ${code}` }),
+    );
+    child.stdin.end(content);                       // content goes in raw, never parsed
+
+  })
+}
+
+function createSandbox() {
+  const id = randomUUID().slice(0, 8);
+  const name = `agent-sandbox-${id}`;
+  const workspace = path.resolve("workspaces", id);
+  mkdirSync(workspace, { recursive: true });
+
+  const r = spawnSync(
+    DOCKER,
+    [
+      "run",
+      "-d",
+      "--name",
+      name,
+      "--label",
+      "agent-sandbox=true", // lets you find and clean up leaked ones
+      "-v",
+      `${workspace}:/workspace`,
+      "-w",
+      "/workspace",
+      "--network",
+      "none",
+      "--memory",
+      "512m",
+      "--cpus",
+      "1",
+      "--pids-limit",
+      "256",
+      "node:22",
+      "sleep",
+      "infinity",
+    ],
+    { encoding: "utf8" },
+  );
+
+  if (r.status !== 0)
+    throw new Error(`Sandbox failed to start: ${r.stderr || r.error?.message}`);
+  return { name, workspace };
+}
+
+function destroySandbox(name: string) {
+  spawnSync(DOCKER, ["rm", "-f", name]);
+}
+
+async function runAgent(userQuery: string, sandbox: string) {
   let previousResponseId: string | undefined;
 
   let input: OpenAI.Responses.ResponseInput = [
@@ -157,8 +246,13 @@ async function runAgent(userQuery: string) {
           }
           case "bash": {
             console.log("[bash]", toolArguments.command);
-            result = await runBash(toolArguments.command);
+            result = await runBash(toolArguments.command, sandbox);
             console.log("[bash result]", result);
+            break;
+          }
+          case "write_file": {
+            console.log("[write_file]", toolArguments.path);
+            result = await writeFileContent(sandbox, toolArguments.path, toolArguments.content);
             break;
           }
           default:
@@ -188,8 +282,13 @@ async function runAgent(userQuery: string) {
   }
 }
 
-const answer = await runAgent(
-  "create a file hello.js to greet a user with its name, run the file for the user name as 'Tushar' tell me what it returns or prints.",
-);
-
-console.log(answer);
+const sandbox = createSandbox();
+try {
+  const answer = await runAgent(
+    "create a file hello.js to greet a user with its name, run the file for the user name as 'Tushar' tell me what it returns or prints.",
+    sandbox.name,
+  );
+  console.log(answer);
+} finally {
+  destroySandbox(sandbox.name);
+}
