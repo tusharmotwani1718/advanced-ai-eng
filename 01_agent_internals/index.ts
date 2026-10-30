@@ -53,7 +53,10 @@ const tools: OpenAI.Responses.FunctionTool[] = [
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string", description: "File path, relative to /workspace" },
+        path: {
+          type: "string",
+          description: "File path, relative to /workspace",
+        },
         content: { type: "string", description: "The complete file content" },
       },
       required: ["path", "content"],
@@ -134,24 +137,33 @@ function writeFileContent(
   filePath: string,
   content: string,
 ) {
-  return new Promise<{ok: boolean, error?: string}>((res, _) => {
+  return new Promise<{ ok: boolean; error?: string }>((res, _) => {
     const child = spawn(DOCKER, [
-      "exec", "-i", sandboxName,                    // -i keeps stdin open
-      "sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"',
-      "sh", filePath,                               // becomes $0 and $1 in the script
+      "exec",
+      "-i",
+      sandboxName, // -i keeps stdin open
+      "sh",
+      "-c",
+      'mkdir -p "$(dirname "$1")" && cat > "$1"',
+      "sh",
+      filePath, // becomes $0 and $1 in the script
     ]);
 
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (e) => res({ ok: false, error: e.message }));
     child.on("close", (code) =>
-      res(code === 0 ? { ok: true } : { ok: false, error: stderr || `exit code ${code}` }),
+      res(
+        code === 0
+          ? { ok: true }
+          : { ok: false, error: stderr || `exit code ${code}` },
+      ),
     );
-    child.stdin.end(content);                       // content goes in raw, never parsed
-
-  })
+    child.stdin.end(content); // content goes in raw, never parsed
+  });
 }
 
+// sandbox functions to run isolated environments
 function createSandbox() {
   const id = randomUUID().slice(0, 8);
   const name = `agent-sandbox-${id}`;
@@ -208,6 +220,8 @@ async function runAgent(userQuery: string, sandbox: string) {
   const maxIterations = 10;
   let turns = 0;
 
+  const toolCallCounts = new Map<string, number>(); // toolName -> call counts
+
   while (turns++ < maxIterations) {
     const response = await client.responses.create({
       model: "gpt-4.1-mini",
@@ -252,7 +266,11 @@ async function runAgent(userQuery: string, sandbox: string) {
           }
           case "write_file": {
             console.log("[write_file]", toolArguments.path);
-            result = await writeFileContent(sandbox, toolArguments.path, toolArguments.content);
+            result = await writeFileContent(
+              sandbox,
+              toolArguments.path,
+              toolArguments.content,
+            );
             break;
           }
           default:
@@ -266,10 +284,22 @@ async function runAgent(userQuery: string, sandbox: string) {
         };
       }
 
+      const key = `${name}:${toolCall.arguments}`;
+      const count = (toolCallCounts.get(key) ?? 0) + 1;
+      toolCallCounts.set(key, count);
+
+      const payload =
+        count >= 3
+          ? {
+              result,
+              warning: `You have made this exact call ${count} times with the same result. Try a different approach.`,
+            }
+          : result;
+
       toolOutputs.push({
         type: "function_call_output",
         call_id: toolCall.call_id,
-        output: JSON.stringify(result),
+        output: JSON.stringify(payload),
       });
     }
 
