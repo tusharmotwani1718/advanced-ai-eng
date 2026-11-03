@@ -6,7 +6,7 @@ import path from "node:path";
 import { ToolsRegistry } from "./tools";
 import { z } from "zod";
 import type { ToolContext } from "./types";
-import { askApproval } from "./utils";
+import { askApproval, isReadOnly, logData } from "./utils";
 
 const client = new OpenAI();
 
@@ -34,7 +34,7 @@ async function callTool(
   name: string,
   rawArgs: string,
   ctx: ToolContext,
-): Promise<String> {
+): Promise<string> {
   const tool = ToolsRegistry.find((tool) => tool.name == name);
   if (!tool) {
     return `ERROR: Invalid tool called, Available tools: ${ToolsRegistry.map((tool) => tool.name)}`;
@@ -115,7 +115,6 @@ function destroySandbox(name: string) {
 }
 
 async function runAgent(userQuery: string, sandboxName: string) {
-
   let input: OpenAI.Responses.ResponseInput = [
     {
       role: "user",
@@ -139,10 +138,8 @@ async function runAgent(userQuery: string, sandboxName: string) {
     // add the model response at each turn to the context
     input.push(...(response.output as OpenAI.Responses.ResponseInput));
 
-    // console.log(`model response 🤖...`);
-    // console.log(`${JSON.stringify(response)}`);
-    console.log(`output...${JSON.stringify(response.output)}`);
-    console.log(`usage...${JSON.stringify(response.usage)}`);
+    logData("response/output", response.output);
+    logData("response/usage", response.usage);
 
     // tool calls that model has requested, call the tools manually in your code
     const toolCalls = response.output.filter(
@@ -150,53 +147,56 @@ async function runAgent(userQuery: string, sandboxName: string) {
     );
 
     if (toolCalls.length === 0) {
+      logData("response/output-text", response.output_text);
       return response.output_text;
     }
 
-    const toolOutputs: OpenAI.Responses.ResponseInput = [];
-
-    for (const toolCall of toolCalls) {
-      const { name } = toolCall;
-
-      const output = await callTool(toolCall.name, toolCall.arguments, {
-        sandboxName,
+    // parallel execution:
+    const runOneTool = async (
+      tc: (typeof toolCalls)[number],
+    ): Promise<string> => {
+      const started = Date.now();
+      const output = await callTool(tc.name, tc.arguments, { sandboxName });
+      logData("tool_call/run-one", {
+        name: tc.name,
+        args: tc.arguments,
+        ms: Date.now() - started,
       });
+      return output;
+    };
 
-      const key = `${name}:${toolCall.arguments}`;
+    let outputs: string[];
+    if (toolCalls.every((tc) => isReadOnly(tc.name))) {
+      outputs = await Promise.all(toolCalls.map(runOneTool)); // results come back in the original order
+    } else {
+      outputs = [];
+      for (const tc of toolCalls) outputs.push(await runOneTool(tc));
+    }
+
+    toolCalls.forEach((tc, i) => {
+      const key = `${tc.name}:${tc.arguments}`;
       const count = (toolCallCounts.get(key) ?? 0) + 1;
       toolCallCounts.set(key, count);
 
-      const payload =
-        count >= 3
-          ? {
-              output,
-              warning: `You have made this exact call ${count} times with the same result. Try a different approach.`,
-            }
-          : output;
+      let output = outputs[i]!;
+      if (count >= 3) {
+        output += `\n\nWARNING: you have made this exact call ${count} times. Try a different approach.`;
+      }
 
-      toolOutputs.push({
-        type: "function_call_output",
-        call_id: toolCall.call_id,
-        output: JSON.stringify(payload),
-      });
-    }
-
-    // add the tool outputs to the context too
-    input.push(...toolOutputs);
+      input.push({ type: "function_call_output", call_id: tc.call_id, output });
+    });
   }
 
-  if (turns > maxIterations) {
-    throw new Error("Agent exceeded maximum iterations");
-  }
+  throw new Error("Agent exceeded maximum iterations");
 }
 
 const sandbox = createSandbox();
 try {
   const answer = await runAgent(
-    "create a file hello.js to greet a user with its name, run the file for the user name as 'Tushar' tell me what it returns or prints and delete the file once the task is done.",
+    "create three files a.txt, b.txt and c.txt all written with a+b+c = d",
     sandbox.name,
   );
-  console.log(answer);
+  logData("runAgent/response", answer);
 } finally {
   destroySandbox(sandbox.name);
 }

@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import * as readline from "node:readline/promises";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { ToolsRegistry } from "./tools";
 
 const DOCKER = process.env.DOCKER_PATH ?? "docker";
 
@@ -94,3 +96,16 @@ export async function askApproval(name: string, args: unknown) {
   rl.close();
   return answer.trim().toLowerCase() === "y";
 }
+
+
+mkdirSync("runs", {recursive: true});
+const logFile = `runs/${Date.now()}.jsonl`;
+
+export const logData = (event: string, data: unknown) => {
+  appendFileSync(logFile, JSON.stringify({t: new Date().toISOString(), event, data}) + "\n")
+}
+
+
+export const isReadOnly = (name: string) => ToolsRegistry.find((t) => t.name === name)?.readOnly === true;
+
+
