@@ -115,7 +115,6 @@ function destroySandbox(name: string) {
 }
 
 async function runAgent(userQuery: string, sandboxName: string) {
-  let previousResponseId: string | undefined;
 
   let input: OpenAI.Responses.ResponseInput = [
     {
@@ -135,15 +134,15 @@ async function runAgent(userQuery: string, sandboxName: string) {
       instructions: systemPrompt,
       tools: openAITools,
       input: input,
-      ...(previousResponseId && {
-        previous_response_id: previousResponseId,
-      }),
     });
 
-    previousResponseId = response.id;
+    // add the model response at each turn to the context
+    input.push(...(response.output as OpenAI.Responses.ResponseInput));
 
-    console.log(`model response 🤖...`);
-    console.log(`${JSON.stringify(response)}`);
+    // console.log(`model response 🤖...`);
+    // console.log(`${JSON.stringify(response)}`);
+    console.log(`output...${JSON.stringify(response.output)}`);
+    console.log(`usage...${JSON.stringify(response.usage)}`);
 
     // tool calls that model has requested, call the tools manually in your code
     const toolCalls = response.output.filter(
@@ -182,8 +181,8 @@ async function runAgent(userQuery: string, sandboxName: string) {
       });
     }
 
-    // The next request supplies only the tool results.
-    input = toolOutputs;
+    // add the tool outputs to the context too
+    input.push(...toolOutputs);
   }
 
   if (turns > maxIterations) {
