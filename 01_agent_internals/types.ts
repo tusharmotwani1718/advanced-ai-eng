@@ -12,3 +12,6 @@ export type Tool<A> = {
   needsApproval?: boolean; // security phase: ask the user first
   run: (args: A, ctx: ToolContext) => Promise<string>; // returns text for the model
 };
+
+
+export type StopReason = "done" | "max_turns" | "token_budget" | "aborted" | "stuck";

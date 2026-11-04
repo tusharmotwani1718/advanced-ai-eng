@@ -5,12 +5,62 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { ToolsRegistry } from "./tools";
 import { z } from "zod";
-import type { ToolContext } from "./types";
+import type { StopReason, ToolContext } from "./types";
 import { askApproval, isReadOnly, logData } from "./utils";
 
-const client = new OpenAI();
+const client = new OpenAI({
+  maxRetries: 0,
+});
 
 const DOCKER = process.env.DOCKER_PATH ?? "docker";
+
+const controller = new AbortController();
+process.on("SIGINT", () => {
+  console.log("\nReceived Ctrl+C. Stopping agent...");
+  controller.abort();
+}); // Ctrl+C
+
+const MAX_TOKENS = 200_000; // total for one run
+let tokensUsed = 0;
+
+const stop = (StopReason: StopReason) => {
+  console.log(`Agent stopped due to ${StopReason}`);
+  return;
+};
+
+// retry mechanism
+const sleep = (milliseconds: number) => {
+  return new Promise((res, _) => setTimeout(res, milliseconds));
+};
+
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, baseMs = 500) {
+  let attempts = 0;
+  while (attempts < retries) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRetriable =
+        err instanceof OpenAI.APIConnectionError ||
+        (err instanceof OpenAI.APIError &&
+          (err.status === 429 || (err.status ?? 0) >= 500));
+
+      if (!isRetriable || attempts > retries) {
+        throw err;
+      }
+
+      // Exponential backoff with "full jitter": a random delay up to the cap
+      const delay = Math.random() * Math.min(30_000, baseMs * 2 ** attempts);
+      logData("retry", {
+        attempt: attempts + 1,
+        delayMs: Math.round(delay),
+        error: String(err),
+      });
+      await sleep(delay);
+    }
+
+    attempts++;
+  }
+}
 
 // convert our tools in open ai compatible format:
 const openAITools: OpenAI.Responses.FunctionTool[] = ToolsRegistry.map(
@@ -128,12 +178,38 @@ async function runAgent(userQuery: string, sandboxName: string) {
   const toolCallCounts = new Map<string, number>(); // toolName -> call counts
 
   while (turns++ < maxIterations) {
-    const response = await client.responses.create({
-      model: "gpt-4.1-mini",
-      instructions: systemPrompt,
-      tools: openAITools,
-      input: input,
-    });
+    let response:
+      | (OpenAI.Responses.Response & {
+          _request_id?: string | null | undefined;
+        })
+      | undefined;
+
+    try {
+      response = await withRetry(() =>
+        client.responses.create(
+          {
+            model: "gpt-4.1-mini",
+            instructions: systemPrompt,
+            tools: openAITools,
+            input: input,
+          },
+          { signal: controller.signal },
+        ),
+      );
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return stop("aborted");
+      }
+
+      throw error;
+    }
+
+    if (!response) {
+      throw new Error(`Error calling the API`);
+    }
+
+    tokensUsed += response.usage?.total_tokens ?? 0;
+    if (tokensUsed > MAX_TOKENS) stop("max_turns");
 
     // add the model response at each turn to the context
     input.push(...(response.output as OpenAI.Responses.ResponseInput));
@@ -181,6 +257,10 @@ async function runAgent(userQuery: string, sandboxName: string) {
       let output = outputs[i]!;
       if (count >= 3) {
         output += `\n\nWARNING: you have made this exact call ${count} times. Try a different approach.`;
+      }
+
+      if (count >= 5) {
+        return stop("stuck");
       }
 
       input.push({ type: "function_call_output", call_id: tc.call_id, output });
