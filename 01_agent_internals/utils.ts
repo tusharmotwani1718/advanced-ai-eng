@@ -7,6 +7,7 @@ const DOCKER = process.env.DOCKER_PATH ?? "docker";
 
 type ExecOpts = { timeoutSec?: number; stdin?: string };
 
+// execute a command in a docker sandbox
 export function dockerExec(
   sandbox: string,
   cmd: string[],
@@ -54,8 +55,14 @@ export function dockerExec(
   });
 }
 
-export async function readSandboxFile(sandbox: string, path: string) {
-  const r = await dockerExec(sandbox, ["cat", "--", path]);
+export async function readSandboxFile(
+  sandbox: string,
+  path: string,
+  dockerExecTimeoutSeconds: number,
+) {
+  const r = await dockerExec(sandbox, ["cat", "--", path], {
+    timeoutSec: dockerExecTimeoutSeconds,
+  });
   if (r.exitCode !== 0)
     return {
       ok: false as const,
@@ -68,11 +75,12 @@ export async function writeSandboxFile(
   sandbox: string,
   path: string,
   content: string,
+  dockerExecTimeoutSeconds: number,
 ) {
   const r = await dockerExec(
     sandbox,
     ["sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", path], // path is $1, never interpolated
-    { stdin: content }, // content never parsed by a shell
+    { stdin: content, timeoutSec: dockerExecTimeoutSeconds }, // content never parsed by a shell
   );
   if (r.exitCode !== 0)
     return {
@@ -97,15 +105,15 @@ export async function askApproval(name: string, args: unknown) {
   return answer.trim().toLowerCase() === "y";
 }
 
-
-mkdirSync("runs", {recursive: true});
+mkdirSync("runs", { recursive: true });
 const logFile = `runs/${Date.now()}.jsonl`;
 
 export const logData = (event: string, data: unknown) => {
-  appendFileSync(logFile, JSON.stringify({t: new Date().toISOString(), event, data}) + "\n")
-}
+  appendFileSync(
+    logFile,
+    JSON.stringify({ t: new Date().toISOString(), event, data }) + "\n",
+  );
+};
 
-
-export const isReadOnly = (name: string) => ToolsRegistry.find((t) => t.name === name)?.readOnly === true;
-
-
+export const isReadOnly = (name: string) =>
+  ToolsRegistry.find((t) => t.name === name)?.readOnly === true;

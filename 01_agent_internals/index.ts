@@ -121,7 +121,9 @@ Use write_file to create or change files. Use bash only to run commands (node, l
 Verify your work by running it. If something fails twice the same way, change your approach.`;
 
 // sandbox functions to run isolated environments
-function createSandbox() {
+function createSandbox(opts: {
+  networkAllow: boolean
+}) {
   const id = randomUUID().slice(0, 8);
   const name = `agent-sandbox-${id}`;
   const workspace = path.resolve("workspaces", id);
@@ -140,8 +142,9 @@ function createSandbox() {
       `${workspace}:/workspace`,
       "-w",
       "/workspace",
-      "--network",
-      "none",
+      // "--network",
+      // "none",
+      ...(opts.networkAllow ? [] : ["--network", "none"]),
       "--memory",
       "512m",
       "--cpus",
@@ -172,7 +175,7 @@ async function runAgent(userQuery: string, sandboxName: string) {
     },
   ];
 
-  const maxIterations = 10;
+  const maxIterations = 40;
   let turns = 0;
 
   const toolCallCounts = new Map<string, number>(); // toolName -> call counts
@@ -196,6 +199,9 @@ async function runAgent(userQuery: string, sandboxName: string) {
           { signal: controller.signal },
         ),
       );
+
+      console.log(`agent response...✅✅`);
+      console.log(JSON.stringify(response));
     } catch (error) {
       if (controller.signal.aborted) {
         return stop("aborted");
@@ -224,6 +230,7 @@ async function runAgent(userQuery: string, sandboxName: string) {
 
     if (toolCalls.length === 0) {
       logData("response/output-text", response.output_text);
+      console.log(`🤖: ${response.output_text}`);
       return response.output_text;
     }
 
@@ -238,6 +245,7 @@ async function runAgent(userQuery: string, sandboxName: string) {
         args: tc.arguments,
         ms: Date.now() - started,
       });
+      logData("tool_call_output/run-one", output);
       return output;
     };
 
@@ -246,7 +254,10 @@ async function runAgent(userQuery: string, sandboxName: string) {
       outputs = await Promise.all(toolCalls.map(runOneTool)); // results come back in the original order
     } else {
       outputs = [];
-      for (const tc of toolCalls) outputs.push(await runOneTool(tc));
+      for (const tc of toolCalls) {
+        const toolCallOutput = await runOneTool(tc);
+        outputs.push(toolCallOutput);
+      }
     }
 
     toolCalls.forEach((tc, i) => {
@@ -270,10 +281,12 @@ async function runAgent(userQuery: string, sandboxName: string) {
   throw new Error("Agent exceeded maximum iterations");
 }
 
-const sandbox = createSandbox();
+const sandbox = createSandbox({
+  networkAllow: true
+});
 try {
   const answer = await runAgent(
-    "create three files a.txt, b.txt and c.txt all written with a+b+c = d",
+    "start a vite project with react and tailwind, add express server with node js runtime and initialise mongo db environment too. Baiscally a MERN stack project. also keep the env vars required in .env.example of the root repo and keep the repo name as truehabit and setup the project inside that repo only.",
     sandbox.name,
   );
   logData("runAgent/response", answer);

@@ -1,6 +1,11 @@
-import { z } from "zod";
+import {  z } from "zod";
 import type { Tool } from "./types";
-import { dockerExec, lineCount, readSandboxFile, writeSandboxFile } from "./utils";
+import {
+  dockerExec,
+  lineCount,
+  readSandboxFile,
+  writeSandboxFile,
+} from "./utils";
 
 function defineTool<T>(tool: Tool<T>) {
   return tool;
@@ -22,12 +27,15 @@ export const readFileTool = defineTool({
         .number()
         .describe("maximum number of lines to read at once")
         .nullable(),
+      dockerExecTimeoutSeconds: z.number().default(30),
     })
     .strict(),
   async run(args, ctx) {
-    const { path, offset, limit } = args;
+    const { path, offset, limit, dockerExecTimeoutSeconds } = args;
 
-    const run = await dockerExec(ctx.sandboxName, ["cat", "--", path]);
+    const run = await dockerExec(ctx.sandboxName, ["cat", "--", path], {
+      timeoutSec: dockerExecTimeoutSeconds,
+    });
     if (run.exitCode !== 0) {
       return `ERROR: Failed to read file: ${run.stderr}`;
     }
@@ -70,11 +78,17 @@ export const writeFileTool = defineTool({
     .object({
       path: z.string().min(1).describe("File path, relative to /workspace"),
       content: z.string().describe("The complete file content"),
+      dockerExecTimeoutSeconds: z.number().default(30),
     })
     .strict(),
 
-  async run({ path, content }, ctx) {
-    const r = await writeSandboxFile(ctx.sandboxName, path, content);
+  async run({ path, content, dockerExecTimeoutSeconds }, ctx) {
+    const r = await writeSandboxFile(
+      ctx.sandboxName,
+      path,
+      content,
+      dockerExecTimeoutSeconds,
+    );
     if (!r.ok) return `ERROR: could not write ${path}: ${r.error}`;
     return `Wrote ${path} (${lineCount(content)} lines, ${Buffer.byteLength(content)} bytes).`;
   },
@@ -82,20 +96,25 @@ export const writeFileTool = defineTool({
 
 export const deleteFileTool = defineTool({
   name: "delete_file",
-  description: "Delete a single file in /workspace. Cannot delete folders. The user must approve each deletion.",
+  description:
+    "Delete a single file in /workspace. Cannot delete folders. The user must approve each deletion.",
   readOnly: false,
   needsApproval: true,
   schema: z
     .object({
       path: z.string().min(1).describe("File path, relative to /workspace"),
+      dockerExecTimeoutSeconds: z.number().default(30),
     })
     .strict(),
 
-  async run({ path }, ctx) {
+  async run({ path, dockerExecTimeoutSeconds }, ctx) {
     // No -r: rm refuses folders, so one call can't wipe a directory tree.
     // No -f: a missing file is reported as an error instead of silently "succeeding".
-    const r = await dockerExec(ctx.sandboxName, ["rm", "--", path]);
-    if (r.exitCode !== 0) return `ERROR: could not delete ${path}: ${r.stderr.trim() || `exit code ${r.exitCode}`}`;
+    const r = await dockerExec(ctx.sandboxName, ["rm", "--", path], {
+      timeoutSec: dockerExecTimeoutSeconds,
+    });
+    if (r.exitCode !== 0)
+      return `ERROR: could not delete ${path}: ${r.stderr.trim() || `exit code ${r.exitCode}`}`;
     return `Deleted ${path}.`;
   },
 });
@@ -111,15 +130,29 @@ export const editFileTool = defineTool({
     .object({
       path: z.string().min(1).describe("File path, relative to /workspace"),
       old_string: z.string().min(1).describe("Exact text to replace"),
-      new_string: z.string().describe("Replacement text; empty string deletes old_string"),
-      replace_all: z.boolean().nullable().describe("Replace every occurrence. null = false"),
+      new_string: z
+        .string()
+        .describe("Replacement text; empty string deletes old_string"),
+      replace_all: z
+        .boolean()
+        .nullable()
+        .describe("Replace every occurrence. null = false"),
+      dockerExecTimeoutSeconds: z.number().default(30),
     })
     .strict(),
 
-  async run({ path, old_string, new_string, replace_all }, ctx) {
-    if (old_string === new_string) return "ERROR: old_string and new_string are identical; nothing to change.";
+  async run(
+    { path, old_string, new_string, replace_all, dockerExecTimeoutSeconds },
+    ctx,
+  ) {
+    if (old_string === new_string)
+      return "ERROR: old_string and new_string are identical; nothing to change.";
 
-    const file = await readSandboxFile(ctx.sandboxName, path);
+    const file = await readSandboxFile(
+      ctx.sandboxName,
+      path,
+      dockerExecTimeoutSeconds,
+    );
     if (!file.ok) return `ERROR: could not read ${path}: ${file.error}`;
     const content = file.content;
 
@@ -135,32 +168,44 @@ export const editFileTool = defineTool({
     // replacement text as special patterns, which would corrupt code containing "$".
     const updated = content.split(old_string).join(new_string);
 
-    const w = await writeSandboxFile(ctx.sandboxName, path, updated);
+    const w = await writeSandboxFile(
+      ctx.sandboxName,
+      path,
+      updated,
+      dockerExecTimeoutSeconds,
+    );
     if (!w.ok) return `ERROR: could not write ${path}: ${w.error}`;
 
-    const firstLine = content.slice(0, content.indexOf(old_string)).split("\n").length;
+    const firstLine = content
+      .slice(0, content.indexOf(old_string))
+      .split("\n").length;
     return `Edited ${path}: replaced ${matches} occurrence${matches > 1 ? "s" : ""} (first at line ${firstLine}).`;
   },
 });
 
 export const bashTool = defineTool({
   name: "bash",
-  description: "Run a bash command in /workspace. Returns exit code, stdout and stderr. Do not use this to write file contents.",
+  description:
+    "Run a bash command in /workspace. Returns exit code, stdout and stderr. Do not use this to write file contents.",
   readOnly: false,
   schema: z
-    .object({ command: z.string().min(1).describe("Command to run") })
+    .object({
+      command: z.string().min(1).describe("Command to run"),
+      dockerExecTimeoutSeconds: z.number().default(30),
+    })
     .strict(),
-  async run({ command }, ctx) {
-    const r = await dockerExec(ctx.sandboxName, ["bash", "-c", command]);
+  async run({ command, dockerExecTimeoutSeconds }, ctx) {
+    const r = await dockerExec(ctx.sandboxName, ["bash", "-c", command], {
+      timeoutSec: dockerExecTimeoutSeconds,
+    });
     return `exit code: ${r.exitCode}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`;
   },
 });
-
 
 export const ToolsRegistry: Tool<any>[] = [
   readFileTool,
   writeFileTool,
   deleteFileTool,
   editFileTool,
-  bashTool
-]
+  bashTool,
+];
