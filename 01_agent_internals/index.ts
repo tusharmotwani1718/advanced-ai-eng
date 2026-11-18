@@ -9,7 +9,6 @@ import type { StopReason, ToolContext } from "./types";
 import { askApproval, isReadOnly, logData } from "./utils";
 import {
   clearStaleToolOutputsForACall,
-  clearStaleToolOutputsForaCall,
 } from "./context/utils";
 import { InputItems } from "openai/resources/responses.js";
 
@@ -38,7 +37,7 @@ const sleep = (milliseconds: number) => {
   return new Promise((res, _) => setTimeout(res, milliseconds));
 };
 
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, baseMs = 500) {
+export async function withRetry<T>(fn: () => Promise<T>, retries = 3, baseMs = 500) {
   let attempts = 0;
   while (attempts < retries) {
     try {
