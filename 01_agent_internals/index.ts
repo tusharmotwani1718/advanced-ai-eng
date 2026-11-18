@@ -7,6 +7,11 @@ import { ToolsRegistry } from "./tools";
 import { z } from "zod";
 import type { StopReason, ToolContext } from "./types";
 import { askApproval, isReadOnly, logData } from "./utils";
+import {
+  clearStaleToolOutputsForACall,
+  clearStaleToolOutputsForaCall,
+} from "./context/utils";
+import { InputItems } from "openai/resources/responses.js";
 
 const client = new OpenAI({
   maxRetries: 0,
@@ -110,7 +115,11 @@ async function callTool(
         return `DENIED: the user did not approve this ${tool.name} call. Do not retry it; continue without it or ask the user.`;
       }
     }
-    return await tool.run(parsed.data, ctx);
+    const toolRunOutput = await tool.run(parsed.data, ctx);
+    return JSON.stringify({
+      toolRunOutput,
+      args: rawArgs,
+    });
   } catch (error) {
     return `ERROR: ${name} failed: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -121,9 +130,7 @@ Use write_file to create or change files. Use bash only to run commands (node, l
 Verify your work by running it. If something fails twice the same way, change your approach.`;
 
 // sandbox functions to run isolated environments
-function createSandbox(opts: {
-  networkAllow: boolean
-}) {
+function createSandbox(opts: { networkAllow: boolean }) {
   const id = randomUUID().slice(0, 8);
   const name = `agent-sandbox-${id}`;
   const workspace = path.resolve("workspaces", id);
@@ -178,6 +185,9 @@ async function runAgent(userQuery: string, sandboxName: string) {
   const maxIterations = 40;
   let turns = 0;
 
+  type InputItem = OpenAI.Responses.ResponseInputItem;
+  const turnStarts: number[] = [];
+
   const toolCallCounts = new Map<string, number>(); // toolName -> call counts
 
   while (turns++ < maxIterations) {
@@ -217,8 +227,27 @@ async function runAgent(userQuery: string, sandboxName: string) {
     tokensUsed += response.usage?.total_tokens ?? 0;
     if (tokensUsed > MAX_TOKENS) stop("max_turns");
 
-    // add the model response at each turn to the context
-    input.push(...(response.output as OpenAI.Responses.ResponseInput));
+    // mark the length where each model turn begins
+    turnStarts.push(input.length);
+
+    // add the model response of each turn to the context
+    input.push(
+      ...(response.output as OpenAI.Responses.ResponseInput as InputItem[]),
+    );
+
+    const preserveInputItems = 5; // preserve last 'n' input items to be passed to next turn
+
+    const cutoffIndex =
+      turnStarts.length > preserveInputItems
+        ? turnStarts[turnStarts.length - preserveInputItems]
+        : 0;
+
+
+    if (cutoffIndex == undefined) {
+      return `ERROR: no cutoff index, the input compaction may fail`;
+    }
+
+    input = clearStaleToolOutputsForACall(input, cutoffIndex, 500);
 
     logData("response/output", response.output);
     logData("response/usage", response.usage);
@@ -282,11 +311,11 @@ async function runAgent(userQuery: string, sandboxName: string) {
 }
 
 const sandbox = createSandbox({
-  networkAllow: true
+  networkAllow: true,
 });
 try {
   const answer = await runAgent(
-    "start a vite project with react and tailwind, add express server with node js runtime and initialise mongo db environment too. Baiscally a MERN stack project. also keep the env vars required in .env.example of the root repo and keep the repo name as truehabit and setup the project inside that repo only.",
+    "start a vite project with react and tailwind, add express server with node js runtime and initialise mongo db environment too. Baiscally a MERN stack project. also keep the env vars required in .env.example of the root repo and keep the repo name as tiwin and setup the project inside that repo only.",
     sandbox.name,
   );
   logData("runAgent/response", answer);
